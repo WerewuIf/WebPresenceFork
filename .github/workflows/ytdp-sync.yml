@@ -1,0 +1,181 @@
+name: Sync upstream, apply manual YouTube push, and release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  sync-build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check sync token
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$SYNC_TOKEN" || { echo "SYNC_TOKEN repository secret is missing."; exit 1; }
+
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Preserve this workflow before upstream reset
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ytdp-workflow-backup
+          cp .github/workflows/ytdp-sync.yml /tmp/ytdp-workflow-backup/ytdp-sync.yml
+
+      - name: Check upstream
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote get-url upstream >/dev/null 2>&1 || \
+            git remote add upstream https://github.com/KanashiiDev/web-presence.git
+          git fetch --no-tags upstream main
+
+          upstream_sha="$(git rev-parse upstream/main)"
+          short_sha="${upstream_sha:0:7}"
+          version="$(git show upstream/main:package.json | python -c "import json,sys; print(json.load(sys.stdin)['version'])")"
+          expected_tag="manual-push-v${version}-${short_sha}"
+
+          last_sync_message="$(git log --grep='^chore: sync upstream ' -1 --format='%s' || true)"
+          last_sync_sha="$(printf '%s' "$last_sync_message" | sed 's/^chore: sync upstream //')"
+
+          if [ "$last_sync_sha" = "$upstream_sha" ] && gh release view "$expected_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+            echo "Upstream unchanged and release exists: $upstream_sha"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream sync/release needed: $upstream_sha"
+
+      - name: Sync to upstream main
+        if: steps.upstream.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git reset --hard upstream/main
+          mkdir -p .github/workflows
+          cp /tmp/ytdp-workflow-backup/ytdp-sync.yml .github/workflows/ytdp-sync.yml
+
+      - name: Reapply manual push customization
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          PATCHER_B64: "CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAppbXBvcnQgcmUKCkJHID0gUGF0aCgiZXh0ZW5zaW9uL2JhY2tncm91bmQuanMiKQpNQVJLRVIgPSAiLy8gPT09IE1BTlVBTF9QVVNIX1BBVENIX1YxID09PSIKcyA9IEJHLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQoKaWYgTUFSS0VSIG5vdCBpbiBzOgogICAgaWYgImNvbnN0IHN0YXRlID0geyIgbm90IGluIHM6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdCgiTWFudWFsLXB1c2ggcGF0Y2g6IGNhbm5vdCBmaW5kIGBjb25zdCBzdGF0ZSA9IHtgIGluIGV4dGVuc2lvbi9iYWNrZ3JvdW5kLmpzIikKICAgIHMgPSBzLnJlcGxhY2UoCiAgICAgICAgImNvbnN0IHN0YXRlID0geyIsCiAgICAgICAgJ2NvbnN0IHN0YXRlID0ge1xuICBtYW51YWxQdXNoQ2xpZW50SWQ6ICJtYW51YWxfcHVzaCIsJywKICAgICAgICAxLAogICAgKQoKICAgIHVwZGF0ZXIgPSByIiIiCi8vID09PSBNQU5VQUxfUFVTSF9QQVRDSF9WMSA9PT0KY29uc3QgTUFOVUFMX1BVU0hfQ0xJRU5UX0lEID0gIm1hbnVhbF9wdXNoIjsKY29uc3QgTUFOVUFMX1BVU0hfQUxBUk0gPSAibWFudWFsLXB1c2gtcmVmcmVzaCI7Cgpjb25zdCB5b3V0dWJlVmlkZW9VcmwgPSAodXJsKSA9PiB7CiAgdHJ5IHsKICAgIGNvbnN0IHUgPSBuZXcgVVJMKHVybCk7CiAgICBjb25zdCBob3N0ID0gdS5ob3N0bmFtZS50b0xvd2VyQ2FzZSgpOwogICAgbGV0IHZpZGVvSWQgPSBudWxsOwogICAgaWYgKGhvc3QgPT09ICJ5b3V0dS5iZSIgfHwgaG9zdC5lbmRzV2l0aCgiLnlvdXR1LmJlIikpIHsKICAgICAgdmlkZW9JZCA9IHUucGF0aG5hbWUuc3BsaXQoIi8iKS5maWx0ZXIoQm9vbGVhbilbMF0gfHwgbnVsbDsKICAgIH0gZWxzZSBpZiAoaG9zdCA9PT0gInlvdXR1YmUuY29tIiB8fCBob3N0LmVuZHNXaXRoKCIueW91dHViZS5jb20iKSkgewogICAgICB2aWRlb0lkID0gdS5zZWFyY2hQYXJhbXMuZ2V0KCJ2Iik7CiAgICB9CiAgICBpZiAoIXZpZGVvSWQpIHJldHVybiBudWxsOwogICAgcmV0dXJuIGBodHRwczovL3d3dy55b3V0dWJlLmNvbS93YXRjaD92PSR7ZW5jb2RlVVJJQ29tcG9uZW50KHZpZGVvSWQpfWA7CiAgfSBjYXRjaCB7CiAgICByZXR1cm4gbnVsbDsKICB9Cn07Cgpjb25zdCBnZXRNYW51YWxQdXNoID0gYXN5bmMgKCkgPT4gewogIHRyeSB7CiAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBicm93c2VyLnN0b3JhZ2UubG9jYWwuZ2V0KCJtYW51YWxQdXNoIik7CiAgICBjb25zdCB2YWx1ZSA9IHJlc3VsdD8ubWFudWFsUHVzaDsKICAgIGlmICghdmFsdWUgfHwgIXlvdXR1YmVWaWRlb1VybCh2YWx1ZS51cmwpKSByZXR1cm4gbnVsbDsKICAgIHJldHVybiB2YWx1ZTsKICB9IGNhdGNoIHsKICAgIHJldHVybiBudWxsOwogIH0KfTsKCmNvbnN0IGJ1aWxkTWFudWFsQWN0aXZpdHlQYXlsb2FkID0gKG1hbnVhbCkgPT4gKHsKICBkYXRhOiB7CiAgICB0aXRsZTogbWFudWFsLnRpdGxlIHx8ICJZb3VUdWJlIFZpZGVvIiwKICAgIGFydGlzdDogbWFudWFsLmFydGlzdCB8fCAiWW91VHViZSIsCiAgICBpbWFnZTogbWFudWFsLmltYWdlIHx8ICIiLAogICAgc291cmNlOiAiWW91VHViZSIsCiAgICBsaW5rOiAiIiwKICAgIG1vZGU6ICJ3YXRjaCIsCiAgICBpc1BsYXlpbmc6IHRydWUsCiAgICB0aW1lUGFzc2VkOiBOdW1iZXIuaXNGaW5pdGUobWFudWFsLnRpbWVQYXNzZWQpID8gbWFudWFsLnRpbWVQYXNzZWQgOiAwLAogICAgZHVyYXRpb246IE51bWJlci5pc0Zpbml0ZShtYW51YWwuZHVyYXRpb24pID8gbWFudWFsLmR1cmF0aW9uIDogbnVsbCwKICAgIGJ1dHRvbnM6IFt7IGxpbms6IG1hbnVhbC51cmwsIHRleHQ6ICJXYXRjaCBvbiBZb3VUdWJlIiB9XSwKICAgIHNldHRpbmdzOiB7CiAgICAgIHNob3dCdXR0b25zOiB0cnVlLAogICAgICBzaG93QXJ0aXN0OiB0cnVlLAogICAgICBzaG93U291cmNlOiB0cnVlLAogICAgICBzaG93Q292ZXI6IHRydWUsCiAgICAgIGN1c3RvbUJ1dHRvbjE6IGZhbHNlLAogICAgICBjdXN0b21CdXR0b24yOiBmYWxzZSwKICAgIH0sCiAgfSwKICBjbGllbnRJZDogTUFOVUFMX1BVU0hfQ0xJRU5UX0lELAogIHRpbWVzdGFtcDogRGF0ZS5ub3coKSwKfSk7Cgpjb25zdCBzZW5kTWFudWFsUHVzaEFjdGl2aXR5ID0gYXN5bmMgKG1hbnVhbCA9IG51bGwpID0+IHsKICBjb25zdCB2YWx1ZSA9IG1hbnVhbCB8fCBhd2FpdCBnZXRNYW51YWxQdXNoKCk7CiAgaWYgKCF2YWx1ZSkgcmV0dXJuOwoKICBjb25zdCBwYXlsb2FkID0gYnVpbGRNYW51YWxBY3Rpdml0eVBheWxvYWQodmFsdWUpOwoKICBpZiAoc3RhdGUud2ViT25seU1vZGUpIHsKICAgIGNvbnN0IHJhd0FjdGl2aXR5ID0gYnVpbGRBY3Rpdml0eUxvY2FsbHkocGF5bG9hZCk7CiAgICBjb25zdCB3ZWJPbmx5QWN0aXZpdHkgPSBmb3JtYXRGb3JXZWJDb25uZWN0aW9uKHJhd0FjdGl2aXR5KTsKICAgIGF3YWl0IHNlbmRUb1dlYk9ubHlCcmlkZ2UoeyBhY3Rpdml0eTogd2ViT25seUFjdGl2aXR5IH0pOwogICAgcmV0dXJuOwogIH0KCiAgdHJ5IHsKICAgIGF3YWl0IGZldGNoV2l0aFRpbWVvdXQoYGh0dHA6Ly9sb2NhbGhvc3Q6JHtzdGF0ZS5zZXJ2ZXJQb3J0fS91cGRhdGUtcnBjYCwgewogICAgICBtZXRob2Q6ICJQT1NUIiwKICAgICAgaGVhZGVyczogeyAiQ29udGVudC1UeXBlIjogImFwcGxpY2F0aW9uL2pzb24iIH0sCiAgICAgIGJvZHk6IEpTT04uc3RyaW5naWZ5KHBheWxvYWQpLAogICAgfSk7CiAgfSBjYXRjaCAoZXJyb3IpIHsKICAgIGNvbnNvbGUud2FybigiW01hbnVhbCBQdXNoXSBGYWlsZWQgdG8gdXBkYXRlIERpc2NvcmQ6IiwgZXJyb3IpOwogIH0KfTsKCmNvbnN0IGNsZWFyTWFudWFsUHVzaEFjdGl2aXR5ID0gYXN5bmMgKCkgPT4gewogIGlmIChzdGF0ZS53ZWJPbmx5TW9kZSkgewogICAgYXdhaXQgc2VuZFRvV2ViT25seUJyaWRnZSh7IGFjdGl2aXR5OiBudWxsIH0pOwogICAgcmV0dXJuOwogIH0KCiAgdHJ5IHsKICAgIGF3YWl0IGZldGNoV2l0aFRpbWVvdXQoYGh0dHA6Ly9sb2NhbGhvc3Q6JHtzdGF0ZS5zZXJ2ZXJQb3J0fS9jbGVhci1ycGNgLCB7CiAgICAgIG1ldGhvZDogIlBPU1QiLAogICAgICBoZWFkZXJzOiB7ICJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vanNvbiIgfSwKICAgICAgYm9keTogSlNPTi5zdHJpbmdpZnkoeyBjbGllbnRJZDogTUFOVUFMX1BVU0hfQ0xJRU5UX0lEIH0pLAogICAgfSk7CiAgfSBjYXRjaCAoZXJyb3IpIHsKICAgIGNvbnNvbGUud2FybigiW01hbnVhbCBQdXNoXSBGYWlsZWQgdG8gY2xlYXIgRGlzY29yZDoiLCBlcnJvcik7CiAgfQp9OwoKY29uc3QgZW5zdXJlTWFudWFsUHVzaEFsYXJtID0gYXN5bmMgKCkgPT4gewogIGlmICghYnJvd3Nlci5hbGFybXMpIHJldHVybjsKICB0cnkgewogICAgYXdhaXQgYnJvd3Nlci5hbGFybXMuY3JlYXRlKE1BTlVBTF9QVVNIX0FMQVJNLCB7IHBlcmlvZEluTWludXRlczogMC4yNSB9KTsKICB9IGNhdGNoIChlcnJvcikgewogICAgY29uc29sZS53YXJuKCJbTWFudWFsIFB1c2hdIENvdWxkIG5vdCBjcmVhdGUgcmVmcmVzaCBhbGFybToiLCBlcnJvcik7CiAgfQp9OwoKY29uc3Qgc3RvcE1hbnVhbFB1c2hBbGFybSA9IGFzeW5jICgpID0+IHsKICBpZiAoIWJyb3dzZXIuYWxhcm1zKSByZXR1cm47CiAgdHJ5IHsKICAgIGF3YWl0IGJyb3dzZXIuYWxhcm1zLmNsZWFyKE1BTlVBTF9QVVNIX0FMQVJNKTsKICB9IGNhdGNoIHt9Cn07Cgpjb25zdCBleHRyYWN0WW91VHViZVZpZGVvID0gYXN5bmMgKHRhYklkKSA9PiB7CiAgdHJ5IHsKICAgIGNvbnN0IGV4ZWN1dGUgPSAoKSA9PiB7CiAgICAgIGNvbnN0IHZpZGVvID0gZG9jdW1lbnQucXVlcnlTZWxlY3RvcigidmlkZW8iKTsKCiAgICAgIGNvbnN0IHRpdGxlID0KICAgICAgICBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKCJoMS55dGQtd2F0Y2gtbWV0YWRhdGEiKT8udGV4dENvbnRlbnQ/LnRyaW0oKSB8fAogICAgICAgIGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3IoIiN0aXRsZSBoMSIpPy50ZXh0Q29udGVudD8udHJpbSgpIHx8CiAgICAgICAgZG9jdW1lbnQudGl0bGUucmVwbGFjZSgvXHMqLVxzKllvdVR1YmVccyokL2ksICIiKS50cmltKCkgfHwKICAgICAgICAiWW91VHViZSBWaWRlbyI7CgogICAgICBjb25zdCBhcnRpc3QgPQogICAgICAgIGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3IoIiNvd25lciAjY2hhbm5lbC1uYW1lIGEiKT8udGV4dENvbnRlbnQ/LnRyaW0oKSB8fAogICAgICAgIGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3IoIiNjaGFubmVsLW5hbWUgYSIpPy50ZXh0Q29udGVudD8udHJpbSgpIHx8CiAgICAgICAgZG9jdW1lbnQucXVlcnlTZWxlY3RvcigieXRkLWNoYW5uZWwtbmFtZSBhIik/LnRleHRDb250ZW50Py50cmltKCkgfHwKICAgICAgICAiWW91VHViZSI7CgogICAgICBjb25zdCBjYW5vbmljYWwgPQogICAgICAgIGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3IoJ2xpbmtbcmVsPSJjYW5vbmljYWwiXScpPy5ocmVmIHx8CiAgICAgICAgbG9jYXRpb24uaHJlZjsKCiAgICAgIGxldCBjbGVhblVybCA9IGNhbm9uaWNhbDsKICAgICAgdHJ5IHsKICAgICAgICBjb25zdCBwYXJzZWQgPSBuZXcgVVJMKGNhbm9uaWNhbCk7CiAgICAgICAgY29uc3QgaG9zdCA9IHBhcnNlZC5ob3N0bmFtZS50b0xvd2VyQ2FzZSgpOwogICAgICAgIGNvbnN0IGlkID0KICAgICAgICAgIGhvc3QgPT09ICJ5b3V0dS5iZSIgfHwgaG9zdC5lbmRzV2l0aCgiLnlvdXR1LmJlIikKICAgICAgICAgICAgPyBwYXJzZWQucGF0aG5hbWUuc3BsaXQoIi8iKS5maWx0ZXIoQm9vbGVhbilbMF0KICAgICAgICAgICAgOiBwYXJzZWQuc2VhcmNoUGFyYW1zLmdldCgidiIpOwoKICAgICAgICBpZiAoaWQpIHsKICAgICAgICAgIGNsZWFuVXJsID0gYGh0dHBzOi8vd3d3LnlvdXR1YmUuY29tL3dhdGNoP3Y9JHtlbmNvZGVVUklDb21wb25lbnQoaWQpfWA7CiAgICAgICAgfQogICAgICB9IGNhdGNoIHt9CgogICAgICBsZXQgdmlkZW9JZCA9IG51bGw7CiAgICAgIHRyeSB7CiAgICAgICAgdmlkZW9JZCA9IG5ldyBVUkwoY2xlYW5VcmwpLnNlYXJjaFBhcmFtcy5nZXQoInYiKTsKICAgICAgfSBjYXRjaCB7fQoKICAgICAgcmV0dXJuIHsKICAgICAgICB0aXRsZSwKICAgICAgICBhcnRpc3QsCiAgICAgICAgdXJsOiBjbGVhblVybCwKICAgICAgICBpbWFnZTogdmlkZW9JZAogICAgICAgICAgPyBgaHR0cHM6Ly9pLnl0aW1nLmNvbS92aS8ke2VuY29kZVVSSUNvbXBvbmVudCh2aWRlb0lkKX0vaHFkZWZhdWx0LmpwZ2AKICAgICAgICAgIDogIiIsCiAgICAgICAgdGltZVBhc3NlZDogTnVtYmVyLmlzRmluaXRlKHZpZGVvPy5jdXJyZW50VGltZSkgPyB2aWRlby5jdXJyZW50VGltZSA6IDAsCiAgICAgICAgZHVyYXRpb246IE51bWJlci5pc0Zpbml0ZSh2aWRlbz8uZHVyYXRpb24pID8gdmlkZW8uZHVyYXRpb24gOiBudWxsLAogICAgICB9OwogICAgfTsKCiAgICBpZiAoYnJvd3Nlci5zY3JpcHRpbmc/LmV4ZWN1dGVTY3JpcHQpIHsKICAgICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgYnJvd3Nlci5zY3JpcHRpbmcuZXhlY3V0ZVNjcmlwdCh7CiAgICAgICAgdGFyZ2V0OiB7IHRhYklkIH0sCiAgICAgICAgZnVuYzogZXhlY3V0ZSwKICAgICAgfSk7CiAgICAgIHJldHVybiByZXN1bHQ/LlswXT8ucmVzdWx0IHx8IG51bGw7CiAgICB9CgogICAgaWYgKGJyb3dzZXIudGFicz8uZXhlY3V0ZVNjcmlwdCkgewogICAgICBjb25zdCByZXN1bHRzID0gYXdhaXQgYnJvd3Nlci50YWJzLmV4ZWN1dGVTY3JpcHQodGFiSWQsIHsKICAgICAgICBjb2RlOiBgKCR7ZXhlY3V0ZX0pKCk7YCwKICAgICAgfSk7CiAgICAgIHJldHVybiByZXN1bHRzPy5bMF0gfHwgbnVsbDsKICAgIH0KICB9IGNhdGNoIChlcnJvcikgewogICAgY29uc29sZS53YXJuKCJbTWFudWFsIFB1c2hdIEZhaWxlZCB0byByZWFkIFlvdVR1YmUgdmlkZW86IiwgZXJyb3IpOwogIH0KCiAgcmV0dXJuIG51bGw7Cn07Cgpjb25zdCBwdXNoWW91VHViZVRhYiA9IGFzeW5jICh0YWJJZCkgPT4gewogIGNvbnN0IHRhYiA9IGF3YWl0IGJyb3dzZXIudGFicy5nZXQodGFiSWQpOwogIGlmICgheW91dHViZVZpZGVvVXJsKHRhYj8udXJsIHx8ICIiKSkgcmV0dXJuIGZhbHNlOwoKICBjb25zdCB2aWRlbyA9IGF3YWl0IGV4dHJhY3RZb3VUdWJlVmlkZW8odGFiSWQpOwogIGlmICghdmlkZW8gfHwgIXlvdXR1YmVWaWRlb1VybCh2aWRlby51cmwpKSByZXR1cm4gZmFsc2U7CgogIGNvbnN0IG1hbnVhbCA9IHsKICAgIC4uLnZpZGVvLAogICAgdXJsOiB5b3V0dWJlVmlkZW9VcmwodmlkZW8udXJsKSwKICAgIHB1c2hlZEF0OiBEYXRlLm5vdygpLAogIH07CgogIGF3YWl0IGJyb3dzZXIuc3RvcmFnZS5sb2NhbC5zZXQoeyBtYW51YWxQdXNoOiBtYW51YWwgfSk7CiAgYXdhaXQgZW5zdXJlTWFudWFsUHVzaEFsYXJtKCk7CiAgYXdhaXQgc2VuZE1hbnVhbFB1c2hBY3Rpdml0eShtYW51YWwpOwogIHJldHVybiB0cnVlOwp9OwoKY29uc3QgY2xlYXJZb3VUdWJlTWFudWFsUHVzaCA9IGFzeW5jICgpID0+IHsKICBhd2FpdCBicm93c2VyLnN0b3JhZ2UubG9jYWwucmVtb3ZlKCJtYW51YWxQdXNoIik7CiAgYXdhaXQgc3RvcE1hbnVhbFB1c2hBbGFybSgpOwogIGF3YWl0IGNsZWFyTWFudWFsUHVzaEFjdGl2aXR5KCk7Cn07Cgpjb25zdCBpbnN0YWxsTWFudWFsUHVzaE1lbnVzID0gYXN5bmMgKCkgPT4gewogIGlmICghYnJvd3Nlci5jb250ZXh0TWVudXMpIHJldHVybjsKCiAgdHJ5IHsKICAgIGF3YWl0IGJyb3dzZXIuY29udGV4dE1lbnVzLnJlbW92ZUFsbCgpOwogIH0gY2F0Y2gge30KCiAgYXdhaXQgYnJvd3Nlci5jb250ZXh0TWVudXMuY3JlYXRlKHsKICAgIGlkOiAibWFudWFsLXB1c2gteW91dHViZS1wYWdlIiwKICAgIHRpdGxlOiAiUHVzaCB0aGlzIFlvdVR1YmUgdmlkZW8gdG8gRGlzY29yZCIsCiAgICBjb250ZXh0czogWyJwYWdlIl0sCiAgICBkb2N1bWVudFVybFBhdHRlcm5zOiBbCiAgICAgICIqOi8veW91dHViZS5jb20vd2F0Y2gqIiwKICAgICAgIio6Ly8qLnlvdXR1YmUuY29tL3dhdGNoKiIsCiAgICAgICIqOi8veW91dHUuYmUvKiIsCiAgICBdLAogIH0pOwoKICBhd2FpdCBicm93c2VyLmNvbnRleHRNZW51cy5jcmVhdGUoewogICAgaWQ6ICJtYW51YWwtcHVzaC15b3V0dWJlLWFjdGlvbiIsCiAgICB0aXRsZTogIlB1c2ggY3VycmVudCBZb3VUdWJlIHZpZGVvIHRvIERpc2NvcmQiLAogICAgY29udGV4dHM6IFsiYWN0aW9uIl0sCiAgfSk7CgogIGF3YWl0IGJyb3dzZXIuY29udGV4dE1lbnVzLmNyZWF0ZSh7CiAgICBpZDogIm1hbnVhbC1jbGVhci15b3V0dWJlLXBhZ2UiLAogICAgdGl0bGU6ICJDbGVhciBwdXNoZWQgWW91VHViZSB2aWRlbyIsCiAgICBjb250ZXh0czogWyJwYWdlIl0sCiAgfSk7CgogIGF3YWl0IGJyb3dzZXIuY29udGV4dE1lbnVzLmNyZWF0ZSh7CiAgICBpZDogIm1hbnVhbC1jbGVhci15b3V0dWJlLWFjdGlvbiIsCiAgICB0aXRsZTogIkNsZWFyIHB1c2hlZCBZb3VUdWJlIHZpZGVvIiwKICAgIGNvbnRleHRzOiBbImFjdGlvbiJdLAogIH0pOwp9OwoKaWYgKGJyb3dzZXIuY29udGV4dE1lbnVzKSB7CiAgYnJvd3Nlci5jb250ZXh0TWVudXMub25DbGlja2VkLmFkZExpc3RlbmVyKGFzeW5jIChpbmZvLCB0YWIpID0+IHsKICAgIHRyeSB7CiAgICAgIGlmICgKICAgICAgICAoaW5mby5tZW51SXRlbUlkID09PSAibWFudWFsLXB1c2gteW91dHViZS1wYWdlIiB8fAogICAgICAgICAgaW5mby5tZW51SXRlbUlkID09PSAibWFudWFsLXB1c2gteW91dHViZS1hY3Rpb24iKSAmJgogICAgICAgIHRhYj8uaWQgIT0gbnVsbAogICAgICApIHsKICAgICAgICBhd2FpdCBwdXNoWW91VHViZVRhYih0YWIuaWQpOwogICAgICAgIHJldHVybjsKICAgICAgfQoKICAgICAgaWYgKAogICAgICAgIGluZm8ubWVudUl0ZW1JZCA9PT0gIm1hbnVhbC1jbGVhci15b3V0dWJlLXBhZ2UiIHx8CiAgICAgICAgaW5mby5tZW51SXRlbUlkID09PSAibWFudWFsLWNsZWFyLXlvdXR1YmUtYWN0aW9uIgogICAgICApIHsKICAgICAgICBhd2FpdCBjbGVhcllvdVR1YmVNYW51YWxQdXNoKCk7CiAgICAgIH0KICAgIH0gY2F0Y2ggKGVycm9yKSB7CiAgICAgIGNvbnNvbGUud2FybigiW01hbnVhbCBQdXNoXSBDb250ZXh0LW1lbnUgYWN0aW9uIGZhaWxlZDoiLCBlcnJvcik7CiAgICB9CiAgfSk7Cn0KCmlmIChicm93c2VyLmFsYXJtcykgewogIGJyb3dzZXIuYWxhcm1zLm9uQWxhcm0uYWRkTGlzdGVuZXIoYXN5bmMgKGFsYXJtKSA9PiB7CiAgICBpZiAoYWxhcm0/Lm5hbWUgIT09IE1BTlVBTF9QVVNIX0FMQVJNKSByZXR1cm47CgogICAgY29uc3QgbWFudWFsID0gYXdhaXQgZ2V0TWFudWFsUHVzaCgpOwogICAgaWYgKG1hbnVhbCkgewogICAgICBhd2FpdCBzZW5kTWFudWFsUHVzaEFjdGl2aXR5KG1hbnVhbCk7CiAgICB9IGVsc2UgewogICAgICBhd2FpdCBzdG9wTWFudWFsUHVzaEFsYXJtKCk7CiAgICB9CiAgfSk7Cn0KCmJyb3dzZXIucnVudGltZS5vbkluc3RhbGxlZD8uYWRkTGlzdGVuZXIoYXN5bmMgKCkgPT4gewogIGF3YWl0IGluc3RhbGxNYW51YWxQdXNoTWVudXMoKTsKCiAgY29uc3QgbWFudWFsID0gYXdhaXQgZ2V0TWFudWFsUHVzaCgpOwogIGlmIChtYW51YWwpIHsKICAgIGF3YWl0IGVuc3VyZU1hbnVhbFB1c2hBbGFybSgpOwogICAgYXdhaXQgc2VuZE1hbnVhbFB1c2hBY3Rpdml0eShtYW51YWwpOwogIH0KfSk7Cgpicm93c2VyLnJ1bnRpbWUub25TdGFydHVwPy5hZGRMaXN0ZW5lcihhc3luYyAoKSA9PiB7CiAgYXdhaXQgaW5zdGFsbE1hbnVhbFB1c2hNZW51cygpOwoKICBjb25zdCBtYW51YWwgPSBhd2FpdCBnZXRNYW51YWxQdXNoKCk7CiAgaWYgKG1hbnVhbCkgewogICAgYXdhaXQgZW5zdXJlTWFudWFsUHVzaEFsYXJtKCk7CiAgICBhd2FpdCBzZW5kTWFudWFsUHVzaEFjdGl2aXR5KG1hbnVhbCk7CiAgfQp9KTsKCmJyb3dzZXIuc3RvcmFnZS5vbkNoYW5nZWQ/LmFkZExpc3RlbmVyKGFzeW5jIChjaGFuZ2VzLCBhcmVhTmFtZSkgPT4gewogIGlmIChhcmVhTmFtZSAhPT0gImxvY2FsIiB8fCAhY2hhbmdlcy5tYW51YWxQdXNoKSByZXR1cm47CgogIGNvbnN0IG1hbnVhbCA9IGNoYW5nZXMubWFudWFsUHVzaC5uZXdWYWx1ZTsKCiAgaWYgKG1hbnVhbCkgewogICAgYXdhaXQgZW5zdXJlTWFudWFsUHVzaEFsYXJtKCk7CiAgICBhd2FpdCBzZW5kTWFudWFsUHVzaEFjdGl2aXR5KG1hbnVhbCk7CiAgfSBlbHNlIHsKICAgIGF3YWl0IHN0b3BNYW51YWxQdXNoQWxhcm0oKTsKICB9Cn0pOwoiIiIuc3RyaXAoIlxuIikKCiAgICBpbnNlcnRpb24gPSByZS5zZWFyY2gociJcbm1haW5Mb29wXChcKTsiLCBzKQogICAgaWYgaW5zZXJ0aW9uOgogICAgICAgIHMgPSBzWzppbnNlcnRpb24uc3RhcnQoKV0gKyAiXG5cbiIgKyB1cGRhdGVyICsgc1tpbnNlcnRpb24uc3RhcnQoKTpdCiAgICBlbHNlOgogICAgICAgIHMgKz0gIlxuXG4iICsgdXBkYXRlciArICJcbiIKCiAgICB1cGRfYW5jaG9yID0gImNvbnN0IHVwZGF0ZVJwYyA9IGFzeW5jIChkYXRhLCB0YWJJZCkgPT4geyIKICAgIGlmIHVwZF9hbmNob3Igbm90IGluIHM6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdCgiTWFudWFsLXB1c2ggcGF0Y2g6IGNhbm5vdCBmaW5kIHVwZGF0ZVJwYyBkZWNsYXJhdGlvbiIpCiAgICBzID0gcy5yZXBsYWNlKAogICAgICAgIHVwZF9hbmNob3IsCiAgICAgICAgdXBkX2FuY2hvciArICIiIgogIGNvbnN0IG1hbnVhbFB1c2ggPSBhd2FpdCBnZXRNYW51YWxQdXNoKCk7CiAgaWYgKG1hbnVhbFB1c2gpIHsKICAgIGF3YWl0IHNlbmRNYW51YWxQdXNoQWN0aXZpdHkobWFudWFsUHVzaCk7CiAgICByZXR1cm47CiAgfQoiIiIsCiAgICAgICAgMSwKICAgICkKCiAgICBjbHJfYW5jaG9yID0gJ2NvbnN0IGNsZWFyUnBjRm9yVGFiID0gYXN5bmMgKHRhYklkLCByZWFzb24gPSAiVGFiIGNsb3NlZCIpID0+IHsnCiAgICBpZiBjbHJfYW5jaG9yIG5vdCBpbiBzOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoIk1hbnVhbC1wdXNoIHBhdGNoOiBjYW5ub3QgZmluZCBjbGVhclJwY0ZvclRhYiBkZWNsYXJhdGlvbiIpCiAgICBzID0gcy5yZXBsYWNlKAogICAgICAgIGNscl9hbmNob3IsCiAgICAgICAgY2xyX2FuY2hvciArICIiIgogIGlmIChhd2FpdCBnZXRNYW51YWxQdXNoKCkpIHJldHVybjsKIiIiLAogICAgICAgIDEsCiAgICApCgogICAgQkcud3JpdGVfdGV4dChzLCBlbmNvZGluZz0idXRmLTgiKQoKcHJpbnQoIm1hbnVhbCBwdXNoIGN1c3RvbWl6YXRpb24gYXBwbGllZCIpCg=="
+        run: |
+          set -euo pipefail
+          python -c "import base64,os; exec(compile(base64.b64decode(os.environ['PATCHER_B64']), '<manual-push-patcher>', 'exec'))"
+
+      - name: Commit synchronized customization
+        if: steps.upstream.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git add extension/background.js .github/workflows/ytdp-sync.yml
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: sync upstream ${{ steps.upstream.outputs.upstream_sha }}"
+          else
+            git commit --allow-empty -m "chore: sync upstream ${{ steps.upstream.outputs.upstream_sha }}"
+          fi
+
+          git push --force-with-lease origin HEAD:main
+
+      - name: Setup Node
+        if: steps.upstream.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.upstream.outputs.changed == 'true'
+        run: npm ci
+
+      - name: Build Chrome extension
+        if: steps.upstream.outputs.changed == 'true'
+        run: npm run build:chrome
+
+      - name: Patch generated manifest
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          MANIFEST_PATCHER_B64: "CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAppbXBvcnQganNvbgoKcGF0Y2hlZCA9IDAKZm9yIG1hbmlmZXN0IGluIFBhdGgoImV4dGVuc2lvbkJ1aWxkcy9jaHJvbWUiKS5yZ2xvYigibWFuaWZlc3QuanNvbiIpOgogICAgdHJ5OgogICAgICAgIGRhdGEgPSBqc29uLmxvYWRzKG1hbmlmZXN0LnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKSkKICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgY29udGludWUKCiAgICBwZXJtcyA9IGxpc3QoZGF0YS5nZXQoInBlcm1pc3Npb25zIiwgW10pKQogICAgZm9yIG5lZWRlZCBpbiBbImNvbnRleHRNZW51cyIsICJzY3JpcHRpbmciLCAiYWN0aXZlVGFiIiwgImFsYXJtcyIsICJzdG9yYWdlIl06CiAgICAgICAgaWYgbmVlZGVkIG5vdCBpbiBwZXJtczoKICAgICAgICAgICAgcGVybXMuYXBwZW5kKG5lZWRlZCkKICAgIGRhdGFbInBlcm1pc3Npb25zIl0gPSBwZXJtcwoKICAgIGhvc3RzID0gbGlzdChkYXRhLmdldCgiaG9zdF9wZXJtaXNzaW9ucyIsIFtdKSkKICAgIGZvciBuZWVkZWQgaW4gWyJodHRwczovLyoueW91dHViZS5jb20vKiIsICJodHRwczovL3lvdXR1LmJlLyoiXToKICAgICAgICBpZiBuZWVkZWQgbm90IGluIGhvc3RzOgogICAgICAgICAgICBob3N0cy5hcHBlbmQobmVlZGVkKQogICAgZGF0YVsiaG9zdF9wZXJtaXNzaW9ucyJdID0gaG9zdHMKCiAgICBtYW5pZmVzdC53cml0ZV90ZXh0KAogICAgICAgIGpzb24uZHVtcHMoZGF0YSwgaW5kZW50PTIsIGVuc3VyZV9hc2NpaT1GYWxzZSkgKyAiXG4iLAogICAgICAgIGVuY29kaW5nPSJ1dGYtOCIsCiAgICApCiAgICBwYXRjaGVkICs9IDEKICAgIHByaW50KCJwYXRjaGVkIiwgbWFuaWZlc3QpCgppZiBwYXRjaGVkID09IDA6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJObyBnZW5lcmF0ZWQgbWFuaWZlc3QuanNvbiBmb3VuZCB1bmRlciBleHRlbnNpb25CdWlsZHMvY2hyb21lLyIpCg=="
+        run: |
+          set -euo pipefail
+          python -c "import base64,os; exec(compile(base64.b64decode(os.environ['MANIFEST_PATCHER_B64']), '<manifest-patcher>', 'exec'))"
+
+      - name: Package Chrome extension
+        if: steps.upstream.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          touch /tmp/pack-start
+          npm run pack:chrome
+          find . -type f -name '*.zip' -newer /tmp/pack-start -print
+
+      - name: Locate Chrome package
+        if: steps.upstream.outputs.changed == 'true'
+        id: package
+        run: |
+          set -euo pipefail
+
+          package_path="$(find . -type f -name '*.zip' -newer /tmp/pack-start -print | head -n 1)"
+          test -n "$package_path"
+
+          short_sha="${{ steps.upstream.outputs.upstream_sha }}"
+          short_sha="${short_sha:0:7}"
+          output="YouTubeDiscordPresence-manual-push-${short_sha}.zip"
+
+          cp "$package_path" "$output"
+          echo "path=$output" >> "$GITHUB_OUTPUT"
+
+      - name: Validate
+        if: steps.upstream.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          test -f extension/background.js
+          node --check extension/background.js
+
+          mapfile -t manifests < <(find extensionBuilds/chrome -type f -name manifest.json -print)
+          test "${#manifests[@]}" -gt 0
+
+          for manifest in "${manifests[@]}"; do
+            node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$manifest"
+          done
+
+      - name: Create GitHub release
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          short_sha="${{ steps.upstream.outputs.upstream_sha }}"
+          short_sha="${short_sha:0:7}"
+          tag="manual-push-v${version}-${short_sha}"
+
+          gh release create "$tag" "${{ steps.package.outputs.path }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$(git rev-parse HEAD)" \
+            --title "Manual Push YouTube → Discord Web · v${version} (${short_sha})" \
+            --generate-notes
+
+      - name: No release needed
+        if: steps.upstream.outputs.changed != 'true'
+        run: echo "Upstream unchanged; no release created."
