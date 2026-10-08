@@ -2,6 +2,7 @@ import "./libs/browser-polyfill.js";
 import "./libs/pako.js";
 
 const state = {
+  manualPushClientId: "manual_push",
   serverPort: CONFIG.serverPort,
   discordWebPort: CONFIG.discordWebPort,
   webOnlyMode: false,
@@ -226,6 +227,8 @@ const parserReady = async () => {
 const activeTabMutex = createMutex();
 // RPC and Tab Cleaning operations
 const clearRpcForTab = async (tabId, reason = "Tab closed") => {
+  if (await getManualPush()) return;
+
   return activeTabMutex(async () => {
     // If a clear is already in-progress, skip
     if (!state.activeTabMap.has(tabId) && !state.pendingClear.has(tabId)) {
@@ -422,6 +425,12 @@ const updateActiveTabMap = async (state, tabs) => {
 
 // RPC Update
 const updateRpc = async (data, tabId) => {
+  const manualPush = await getManualPush();
+  if (manualPush) {
+    await sendManualPushActivity(manualPush);
+    return;
+  }
+
   try {
     await browser.tabs.get(tabId);
   } catch (err) {
@@ -1028,3 +1037,302 @@ const init = async () => {
 };
 
 init();
+
+// === MANUAL_PUSH_PATCH_V1 ===
+const MANUAL_PUSH_CLIENT_ID = "manual_push";
+const MANUAL_PUSH_ALARM = "manual-push-refresh";
+const youtubeVideoUrl = (url) => {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    let videoId = null;
+    if (host === "youtu.be" || host.endsWith(".youtu.be")) {
+      videoId = u.pathname.split("/").filter(Boolean)[0] || null;
+    } else if (host === "youtube.com" || host.endsWith(".youtube.com")) {
+      videoId = u.searchParams.get("v");
+    }
+    if (!videoId) return null;
+    return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+  } catch {
+    return null;
+  }
+};
+const getManualPush = async () => {
+  try {
+    const result = await browser.storage.local.get("manualPush");
+    const value = result?.manualPush;
+    if (!value || !youtubeVideoUrl(value.url)) return null;
+    return value;
+  } catch {
+    return null;
+  }
+};
+const buildManualActivityPayload = (manual) => ({
+  data: {
+    title: manual.title || "YouTube Video",
+    artist: manual.artist || "YouTube",
+    image: manual.image || "",
+    source: "YouTube",
+    link: "",
+    mode: "watch",
+    isPlaying: true,
+    timePassed: Number.isFinite(manual.timePassed) ? manual.timePassed : 0,
+    duration: Number.isFinite(manual.duration) ? manual.duration : null,
+    buttons: [{ link: manual.url, text: "Watch on YouTube" }],
+    settings: {
+      showButtons: true,
+      showArtist: true,
+      showSource: true,
+      showCover: true,
+      customButton1: false,
+      customButton2: false,
+    },
+  },
+  clientId: MANUAL_PUSH_CLIENT_ID,
+  timestamp: Date.now(),
+});
+const sendManualPushActivity = async (manual = null) => {
+  const value = manual || await getManualPush();
+  if (!value) return;
+
+  const payload = buildManualActivityPayload(value);
+
+  if (state.webOnlyMode) {
+    const rawActivity = buildActivityLocally(payload);
+    const webOnlyActivity = formatForWebConnection(rawActivity);
+    await sendToWebOnlyBridge({ activity: webOnlyActivity });
+    return;
+  }
+  try {
+    await fetchWithTimeout(`http://localhost:${state.serverPort}/update-rpc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.warn("[Manual Push] Failed to update Discord:", error);
+  }
+};
+
+const clearManualPushActivity = async () => {
+  if (state.webOnlyMode) {
+    await sendToWebOnlyBridge({ activity: null });
+    return;
+  }
+  try {
+    await fetchWithTimeout(`http://localhost:${state.serverPort}/clear-rpc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId: MANUAL_PUSH_CLIENT_ID }),
+    });
+  } catch (error) {
+    console.warn("[Manual Push] Failed to clear Discord:", error);
+  }
+};
+const ensureManualPushAlarm = async () => {
+  if (!browser.alarms) return;
+  try {
+    await browser.alarms.create(MANUAL_PUSH_ALARM, { periodInMinutes: 0.25 });
+  } catch (error) {
+    console.warn("[Manual Push] Could not create refresh alarm:", error);
+  }
+};
+
+const stopManualPushAlarm = async () => {
+  if (!browser.alarms) return;
+  try {
+    await browser.alarms.clear(MANUAL_PUSH_ALARM);
+  } catch {}
+};
+const extractYouTubeVideo = async (tabId) => {
+  try {
+    const execute = () => {
+      const video = document.querySelector("video");
+
+      const title =
+        document.querySelector("h1.ytd-watch-metadata")?.textContent?.trim() ||
+        document.querySelector("#title h1")?.textContent?.trim() ||
+        document.title.replace(/\s*-\s*YouTube\s*$/i, "").trim() ||
+        "YouTube Video";
+      const artist =
+        document.querySelector("#owner #channel-name a")?.textContent?.trim() ||
+        document.querySelector("#channel-name a")?.textContent?.trim() ||
+        document.querySelector("ytd-channel-name a")?.textContent?.trim() ||
+        "YouTube";
+
+      const canonical =
+        document.querySelector('link[rel="canonical"]')?.href ||
+        location.href;
+      let cleanUrl = canonical;
+      try {
+        const parsed = new URL(canonical);
+        const host = parsed.hostname.toLowerCase();
+        const id =
+          host === "youtu.be" || host.endsWith(".youtu.be")
+            ? parsed.pathname.split("/").filter(Boolean)[0]
+            : parsed.searchParams.get("v");
+
+        if (id) {
+          cleanUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+        }
+      } catch {}
+      let videoId = null;
+      try {
+        videoId = new URL(cleanUrl).searchParams.get("v");
+      } catch {}
+
+      return {
+        title,
+        artist,
+        url: cleanUrl,
+        image: videoId
+          ? `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`
+          : "",
+        timePassed: Number.isFinite(video?.currentTime) ? video.currentTime : 0,
+        duration: Number.isFinite(video?.duration) ? video.duration : null,
+      };
+    };
+    if (browser.scripting?.executeScript) {
+      const result = await browser.scripting.executeScript({
+        target: { tabId },
+        func: execute,
+      });
+      return result?.[0]?.result || null;
+    }
+
+    if (browser.tabs?.executeScript) {
+      const results = await browser.tabs.executeScript(tabId, {
+        code: `(${execute})();`,
+      });
+      return results?.[0] || null;
+    }
+  } catch (error) {
+    console.warn("[Manual Push] Failed to read YouTube video:", error);
+  }
+  return null;
+};
+
+const pushYouTubeTab = async (tabId) => {
+  const tab = await browser.tabs.get(tabId);
+  if (!youtubeVideoUrl(tab?.url || "")) return false;
+
+  const video = await extractYouTubeVideo(tabId);
+  if (!video || !youtubeVideoUrl(video.url)) return false;
+
+  const manual = {
+    ...video,
+    url: youtubeVideoUrl(video.url),
+    pushedAt: Date.now(),
+  };
+  await browser.storage.local.set({ manualPush: manual });
+  await ensureManualPushAlarm();
+  await sendManualPushActivity(manual);
+  return true;
+};
+
+const clearYouTubeManualPush = async () => {
+  await browser.storage.local.remove("manualPush");
+  await stopManualPushAlarm();
+  await clearManualPushActivity();
+};
+
+const installManualPushMenus = async () => {
+  if (!browser.contextMenus) return;
+
+  try {
+    await browser.contextMenus.removeAll();
+  } catch {}
+  await browser.contextMenus.create({
+    id: "manual-push-youtube-page",
+    title: "Push this YouTube video to Discord",
+    contexts: ["page"],
+    documentUrlPatterns: [
+      "*://youtube.com/watch*",
+      "*://*.youtube.com/watch*",
+      "*://youtu.be/*",
+    ],
+  });
+
+  await browser.contextMenus.create({
+    id: "manual-push-youtube-action",
+    title: "Push current YouTube video to Discord",
+    contexts: ["action"],
+  });
+  await browser.contextMenus.create({
+    id: "manual-clear-youtube-page",
+    title: "Clear pushed YouTube video",
+    contexts: ["page"],
+  });
+
+  await browser.contextMenus.create({
+    id: "manual-clear-youtube-action",
+    title: "Clear pushed YouTube video",
+    contexts: ["action"],
+  });
+};
+if (browser.contextMenus) {
+  browser.contextMenus.onClicked.addListener(async (info, tab) => {
+    try {
+      if (
+        (info.menuItemId === "manual-push-youtube-page" ||
+          info.menuItemId === "manual-push-youtube-action") &&
+        tab?.id != null
+      ) {
+        await pushYouTubeTab(tab.id);
+        return;
+      }
+      if (
+        info.menuItemId === "manual-clear-youtube-page" ||
+        info.menuItemId === "manual-clear-youtube-action"
+      ) {
+        await clearYouTubeManualPush();
+      }
+    } catch (error) {
+      console.warn("[Manual Push] Context-menu action failed:", error);
+    }
+  });
+}
+
+if (browser.alarms) {
+  browser.alarms.onAlarm.addListener(async (alarm) => {
+    if (alarm?.name !== MANUAL_PUSH_ALARM) return;
+    const manual = await getManualPush();
+    if (manual) {
+      await sendManualPushActivity(manual);
+    } else {
+      await stopManualPushAlarm();
+    }
+  });
+}
+
+browser.runtime.onInstalled?.addListener(async () => {
+  await installManualPushMenus();
+
+  const manual = await getManualPush();
+  if (manual) {
+    await ensureManualPushAlarm();
+    await sendManualPushActivity(manual);
+  }
+});
+
+browser.runtime.onStartup?.addListener(async () => {
+  await installManualPushMenus();
+  const manual = await getManualPush();
+  if (manual) {
+    await ensureManualPushAlarm();
+    await sendManualPushActivity(manual);
+  }
+});
+
+browser.storage.onChanged?.addListener(async (changes, areaName) => {
+  if (areaName !== "local" || !changes.manualPush) return;
+
+  const manual = changes.manualPush.newValue;
+
+  if (manual) {
+    await ensureManualPushAlarm();
+    await sendManualPushActivity(manual);
+  } else {
+    await stopManualPushAlarm();
+  }
+});

@@ -1,0 +1,279 @@
+name: Sync upstream, apply manual YouTube push, and release
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: Create a new release even when upstream did not change
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: webpresence-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Preserve this workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .github/workflows/ytdp-sync.yml
+          mkdir -p /tmp/webpresence-sync
+          cp .github/workflows/ytdp-sync.yml /tmp/webpresence-sync/ytdp-sync.yml
+
+      - name: Fetch upstream and determine whether it changed
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/KanashiiDev/web-presence.git
+          git fetch --prune upstream main
+
+          current_head="$(git rev-parse HEAD)"
+          upstream_head="$(git rev-parse upstream/main)"
+          merge_base="$(git merge-base HEAD upstream/main)"
+
+          if [[ "$merge_base" == "$upstream_head" ]]; then
+            upstream_changed=false
+          else
+            upstream_changed=true
+          fi
+
+          echo "current_head=$current_head" >> "$GITHUB_OUTPUT"
+          echo "upstream_head=$upstream_head" >> "$GITHUB_OUTPUT"
+          echo "upstream_changed=$upstream_changed" >> "$GITHUB_OUTPUT"
+
+          echo "Current fork HEAD : $current_head"
+          echo "Upstream main HEAD: $upstream_head"
+          echo "Upstream changed  : $upstream_changed"
+
+      - name: Reset main to upstream and remove every other workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git checkout -B main
+          git reset --hard upstream/main
+
+          mkdir -p .github/workflows
+          find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -delete
+          cp /tmp/webpresence-sync/ytdp-sync.yml .github/workflows/ytdp-sync.yml
+
+          echo "Only .github/workflows/ytdp-sync.yml will remain in the synchronized repository."
+
+      - name: Reapply manual YouTube push customization
+        shell: bash
+        env:
+          PATCHER_B64: |
+            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
+            TYNjfyPD/2NGv/pNNzRlAPxfm07PfNUpAAA=
+        run: |
+          set -euo pipefail
+          printf '%s' "$PATCHER_B64" | base64 --decode | gzip --decompress | python3
+
+      - name: Validate customized source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m json.tool extension/manifests/manifest.chrome.json >/dev/null
+          python3 -m json.tool extension/manifests/manifest.firefox.json >/dev/null
+          node --check extension/background.js
+          git diff --check
+          test ! -e .github/workflows/build-release.yml
+          test ! -e .github/workflows/eslint.yml
+          test ! -e .github/workflows/prettier.yml
+          test ! -e .github/workflows/crowdin.yml
+
+      - name: Commit synchronized source and workflow cleanup
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add -A .github/workflows extension/background.js extension/manifests/manifest.chrome.json extension/manifests/manifest.firefox.json
+
+          if git diff --cached --quiet; then
+            echo "Repository already matches upstream + manual-push customization."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Sync upstream and reapply manual Discord video push"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          git push --force-with-lease origin HEAD:main
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether this run should publish a release
+        id: publish
+        shell: bash
+        env:
+          UPSTREAM_CHANGED: ${{ steps.sync.outputs.upstream_changed }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_RELEASE: ${{ inputs.force_release }}
+        run: |
+          set -euo pipefail
+
+          publish=false
+
+          if [[ "$UPSTREAM_CHANGED" == "true" ]]; then
+            publish=true
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$FORCE_RELEASE" == "true" ]]; then
+            publish=true
+          fi
+
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Release required: $publish"
+
+      - name: Setup Node
+        if: steps.publish.outputs.publish == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.publish.outputs.publish == 'true'
+        shell: bash
+        run: npm ci
+
+      - name: Build Chrome extension
+        if: steps.publish.outputs.publish == 'true'
+        shell: bash
+        run: npm run build:chrome
+
+      - name: Validate built Chrome extension
+        if: steps.publish.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f extensionBuilds/chrome/manifest.json
+          test -f extensionBuilds/chrome/background.js
+          python3 -m json.tool extensionBuilds/chrome/manifest.json >/dev/null
+          node --check extensionBuilds/chrome/background.js
+
+      - name: Package Chrome extension
+        if: steps.publish.outputs.publish == 'true'
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          short_sha="${{ steps.sync.outputs.upstream_head }}"
+          short_sha="${short_sha:0:7}"
+          asset="WebPresence-Manual-Push-Chrome-v${version}-${short_sha}.zip"
+
+          rm -f "$asset"
+          (cd extensionBuilds/chrome && zip -qr "$GITHUB_WORKSPACE/$asset" .)
+          test -s "$asset"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "Packaged $asset"
+
+      - name: Create GitHub release
+        if: steps.publish.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_head }}
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.package.outputs.version }}"
+          asset="${{ steps.package.outputs.asset }}"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_release }}" == "true" && "${{ steps.sync.outputs.upstream_changed }}" != "true" ]]; then
+            tag="manual-push-v${version}-manual-${{ github.run_number }}"
+            title="Web Presence Manual Push · v${version} · Manual Build #${{ github.run_number }}"
+          else
+            tag="manual-push-v${version}-${UPSTREAM_SHA:0:7}-${{ github.run_number }}"
+            title="Web Presence Manual Push · v${version} · Upstream ${UPSTREAM_SHA:0:7}"
+          fi
+
+          notes="Web Presence build with the manual YouTube → Discord push customization.\n\nUpstream commit: ${UPSTREAM_SHA}\nRepository commit: $(git rev-parse HEAD)\nVersion: ${version}\n\nThe attached ZIP is the built Chrome/Chromium extension. It includes the manual YouTube push context-menu feature and keeps a pushed video active until it is replaced or cleared."
+
+          gh release create "$tag" "$asset" \
+            --repo "${{ github.repository }}" \
+            --target "$(git rev-parse HEAD)" \
+            --title "$title" \
+            --notes "$notes" \
+            --latest
+
+          echo "Created release $tag"
