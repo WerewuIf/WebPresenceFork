@@ -1027,4 +1027,235 @@ const init = async () => {
   await mainLoop();
 };
 
+// === MANUAL_PUSH_CONTROLLER_WEB_V4 ===
+const MANUAL_PUSH_CLIENT_ID = "manual_push";
+const MANUAL_PUSH_ALARM = "manual-push-refresh";
+
+const youtubeVideoUrl = (url) => {
+  try {
+    const u = new URL(String(url || ""));
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    let videoId = null;
+    if (host === "youtu.be") {
+      videoId = u.pathname.split("/").filter(Boolean)[0] || null;
+    } else if (host === "youtube.com" || host === "music.youtube.com") {
+      videoId = u.searchParams.get("v");
+      if (!videoId) {
+        const parts = u.pathname.split("/").filter(Boolean);
+        if (parts[0] === "shorts" && parts[1]) videoId = parts[1];
+      }
+    }
+    if (!videoId) return null;
+    return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+  } catch {
+    return null;
+  }
+};
+
+const getManualPush = async () => {
+  try {
+    const result = await browser.storage.local.get("manualPush");
+    const value = result?.manualPush;
+    if (!value || !youtubeVideoUrl(value.url)) return null;
+    return value;
+  } catch {
+    return null;
+  }
+};
+
+const buildManualActivityPayload = (manual) => ({
+  data: {
+    title: manual.title || "YouTube Video",
+    artist: manual.artist || "YouTube",
+    image: manual.image || "",
+    source: "YouTube",
+    link: "",
+    mode: "watch",
+    isPlaying: true,
+    timePassed: Number.isFinite(manual.timePassed) ? manual.timePassed : 0,
+    duration: Number.isFinite(manual.duration) ? manual.duration : null,
+    buttons: [{ link: manual.url, text: "Watch on YouTube" }],
+    settings: {
+      showButtons: true,
+      showArtist: true,
+      showSource: true,
+      showCover: true,
+      customButton1: false,
+      customButton2: false,
+    },
+  },
+  clientId: MANUAL_PUSH_CLIENT_ID,
+  timestamp: Date.now(),
+});
+
+const sendManualPushActivity = async (manual = null) => {
+  const value = manual || await getManualPush();
+  if (!value) return;
+  const payload = buildManualActivityPayload(value);
+  const rawActivity = buildActivityLocally(payload);
+  const webOnlyActivity = formatForWebConnection(rawActivity);
+  await sendToWebOnlyBridge({ activity: webOnlyActivity });
+};
+
+const clearManualPushActivity = async () => {
+  await sendToWebOnlyBridge({ activity: null });
+};
+
+const ensureManualPushAlarm = async () => {
+  if (!browser.alarms) return;
+  try {
+    await browser.alarms.create(MANUAL_PUSH_ALARM, { periodInMinutes: 0.25 });
+  } catch (error) {
+    console.warn("[Manual Push] Could not create refresh alarm:", error);
+  }
+};
+
+const stopManualPushAlarm = async () => {
+  if (!browser.alarms) return;
+  try {
+    await browser.alarms.clear(MANUAL_PUSH_ALARM);
+  } catch {}
+};
+
+const openManualPushController = async (tabId = null) => {
+  const controllerUrl = new URL(browser.runtime.getURL("popup/manual-push.html"));
+  if (Number.isInteger(tabId)) controllerUrl.searchParams.set("tabId", String(tabId));
+
+  try {
+    const stored = await browser.storage.local.get("manualPushControllerWindowId");
+    const existingId = stored?.manualPushControllerWindowId;
+    if (Number.isInteger(existingId)) {
+      try {
+        await browser.windows.update(existingId, { focused: true });
+        return;
+      } catch {
+        await browser.storage.local.remove("manualPushControllerWindowId");
+      }
+    }
+    if (!browser.windows?.create) {
+      await browser.tabs.create({ url: controllerUrl.toString() });
+      return;
+    }
+    const created = await browser.windows.create({
+      url: controllerUrl.toString(),
+      type: "popup",
+      width: 440,
+      height: 720,
+      focused: true,
+    });
+    if (created?.id != null) {
+      await browser.storage.local.set({ manualPushControllerWindowId: created.id });
+    }
+  } catch (error) {
+    console.warn("[Manual Push] Failed to open controller:", error);
+    try { await browser.tabs.create({ url: controllerUrl.toString() }); } catch {}
+  }
+};
+
+const installManualPushMenus = async () => {
+  if (!browser.contextMenus) return;
+  const ids = [
+    "manual-open-youtube-page",
+    "manual-open-youtube-action",
+    "manual-clear-youtube-page",
+    "manual-clear-youtube-action",
+  ];
+  for (const id of ids) {
+    try { await browser.contextMenus.remove(id); } catch {}
+  }
+  const youtubePatterns = [
+    "*://youtube.com/watch*",
+    "*://*.youtube.com/watch*",
+    "*://music.youtube.com/watch*",
+    "*://youtu.be/*",
+  ];
+  await browser.contextMenus.create({
+    id: "manual-open-youtube-page",
+    title: "Open YouTube → Discord Push Controller",
+    contexts: ["page"],
+    documentUrlPatterns: youtubePatterns,
+  });
+  await browser.contextMenus.create({
+    id: "manual-open-youtube-action",
+    title: "Open YouTube → Discord Push Controller",
+    contexts: ["action"],
+  });
+  await browser.contextMenus.create({
+    id: "manual-clear-youtube-page",
+    title: "Clear pushed YouTube video",
+    contexts: ["page"],
+    documentUrlPatterns: youtubePatterns,
+  });
+  await browser.contextMenus.create({
+    id: "manual-clear-youtube-action",
+    title: "Clear pushed YouTube video",
+    contexts: ["action"],
+  });
+};
+
+if (browser.contextMenus) {
+  browser.contextMenus.onClicked.addListener(async (info, tab) => {
+    try {
+      if (info.menuItemId === "manual-open-youtube-page" || info.menuItemId === "manual-open-youtube-action") {
+        await openManualPushController(tab?.id ?? null);
+        return;
+      }
+      if (info.menuItemId === "manual-clear-youtube-page" || info.menuItemId === "manual-clear-youtube-action") {
+        await browser.storage.local.remove("manualPush");
+      }
+    } catch (error) {
+      console.warn("[Manual Push] Context-menu action failed:", error);
+    }
+  });
+}
+
+browser.alarms?.onAlarm.addListener(async (alarm) => {
+  if (alarm?.name !== MANUAL_PUSH_ALARM) return;
+  const manual = await getManualPush();
+  if (manual) {
+    try { await sendManualPushActivity(manual); } catch (error) { console.warn("[Manual Push] Refresh failed:", error); }
+  } else {
+    await stopManualPushAlarm();
+  }
+});
+
+browser.storage.onChanged?.addListener(async (changes, areaName) => {
+  if (areaName !== "local" || !changes.manualPush) return;
+  const manual = changes.manualPush.newValue;
+  if (manual) {
+    await ensureManualPushAlarm();
+    try { await sendManualPushActivity(manual); } catch (error) { console.warn("[Manual Push] Storage update failed:", error); }
+  } else {
+    await stopManualPushAlarm();
+    try { await clearManualPushActivity(); } catch (error) { console.warn("[Manual Push] Clear failed:", error); }
+  }
+});
+
+browser.runtime.onInstalled?.addListener(async () => {
+  await installManualPushMenus();
+  const manual = await getManualPush();
+  if (manual) {
+    await ensureManualPushAlarm();
+    try { await sendManualPushActivity(manual); } catch (error) { console.warn("[Manual Push] Install restore failed:", error); }
+  }
+});
+
+browser.runtime.onStartup?.addListener(async () => {
+  await installManualPushMenus();
+  const manual = await getManualPush();
+  if (manual) {
+    await ensureManualPushAlarm();
+    try { await sendManualPushActivity(manual); } catch (error) { console.warn("[Manual Push] Startup restore failed:", error); }
+  }
+});
+
+browser.windows?.onRemoved?.addListener(async (windowId) => {
+  try {
+    const stored = await browser.storage.local.get("manualPushControllerWindowId");
+    if (stored?.manualPushControllerWindowId === windowId) {
+      await browser.storage.local.remove("manualPushControllerWindowId");
+    }
+  } catch {}
+});
+
 init();
