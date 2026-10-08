@@ -3,20 +3,28 @@
   "name": "Web Presence for Discord",
   "description": "Show your web presence on Discord!",
   "homepage_url": "https://github.com/KanashiiDev/web-presence",
-
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["tabs", "storage", "contextMenus", "userScripts", "scripting", "alarms"],
-  "host_permissions": ["*://*/*"],
+  "permissions": [
+    "tabs",
+    "storage",
+    "contextMenus",
+    "userScripts",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": [
+    "*://*/*"
+  ],
   "content_scripts": [
     {
       "run_at": "document_idle"
     }
   ],
   "action": {
-    "default_popup": "popup/popup.html",
+    "default_popup": "popup/manual-push.html",
     "default_icon": {
       "16": "icons/16x16.png",
       "32": "icons/32x32.png",
@@ -34,8 +42,14 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["locales/*", "icons/*", "popup/selector/selector.css"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "locales/*",
+        "icons/*",
+        "popup/selector/selector.css"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }
