@@ -1,0 +1,359 @@
+name: Sync upstream, apply YouTube Push Controller, and release
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: Create a new release even when upstream did not change
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: webpresence-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Preserve this workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .github/workflows/ytdp-sync.yml
+          mkdir -p /tmp/webpresence-sync
+          cp .github/workflows/ytdp-sync.yml /tmp/webpresence-sync/ytdp-sync.yml
+
+      - name: Fetch upstream and determine whether it changed
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/KanashiiDev/web-presence.git
+          git fetch --prune upstream main
+
+          current_head="$(git rev-parse HEAD)"
+          upstream_head="$(git rev-parse upstream/main)"
+          merge_base="$(git merge-base HEAD upstream/main)"
+
+          if [[ "$merge_base" == "$upstream_head" ]]; then
+            upstream_changed=false
+          else
+            upstream_changed=true
+          fi
+
+          echo "current_head=$current_head" >> "$GITHUB_OUTPUT"
+          echo "upstream_head=$upstream_head" >> "$GITHUB_OUTPUT"
+          echo "upstream_changed=$upstream_changed" >> "$GITHUB_OUTPUT"
+
+          echo "Current fork HEAD : $current_head"
+          echo "Upstream main HEAD: $upstream_head"
+          echo "Upstream changed  : $upstream_changed"
+
+      - name: Reset main to upstream and remove every other workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout -B main
+          git reset --hard upstream/main
+
+          mkdir -p .github/workflows
+          find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -delete
+          cp /tmp/webpresence-sync/ytdp-sync.yml .github/workflows/ytdp-sync.yml
+
+          echo "Only .github/workflows/ytdp-sync.yml will remain."
+
+      - name: Reapply YouTube Push Controller
+        shell: bash
+        env:
+          PATCHER_B64: |
+            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
+            awAA
+        run: |
+          set -euo pipefail
+          printf '%s' "$PATCHER_B64" | base64 --decode | gzip --decompress | python3
+
+      - name: Validate customized source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m json.tool extension/manifests/manifest.chrome.json >/dev/null
+          python3 -m json.tool extension/manifests/manifest.firefox.json >/dev/null
+          node --check extension/background.js
+          node --check extension/popup/manual-push.js
+          git diff --check
+
+          test -f extension/popup/manual-push.html
+          test -f extension/popup/manual-push.js
+          test -f extension/popup/manual-push.css
+          test ! -e .github/workflows/build-release.yml
+          test ! -e .github/workflows/eslint.yml
+          test ! -e .github/workflows/prettier.yml
+          test ! -e .github/workflows/crowdin.yml
+
+      - name: Commit synchronized source and workflow cleanup
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add -A .github/workflows             extension/background.js             extension/manifests/manifest.chrome.json             extension/manifests/manifest.firefox.json             extension/popup/manual-push.html             extension/popup/manual-push.js             extension/popup/manual-push.css
+
+          if git diff --cached --quiet; then
+            echo "Repository already matches upstream + YouTube Push Controller."
+            changed=false
+          else
+            git commit -m "Sync upstream and reapply YouTube Push Controller"
+            changed=true
+          fi
+
+          git push --force-with-lease origin HEAD:main
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether this run should publish a release
+        id: publish
+        shell: bash
+        env:
+          UPSTREAM_CHANGED: ${{ steps.sync.outputs.upstream_changed }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_RELEASE: ${{ inputs.force_release }}
+        run: |
+          set -euo pipefail
+          publish=false
+
+          if [[ "$UPSTREAM_CHANGED" == "true" ]]; then
+            publish=true
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$FORCE_RELEASE" == "true" ]]; then
+            publish=true
+          fi
+
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Release required: $publish"
+
+      - name: Setup Node
+        if: steps.publish.outputs.publish == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.publish.outputs.publish == 'true'
+        shell: bash
+        run: npm ci
+
+      - name: Build Chrome extension
+        if: steps.publish.outputs.publish == 'true'
+        shell: bash
+        run: npm run build:chrome
+
+      - name: Validate built Chrome extension
+        if: steps.publish.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f extensionBuilds/chrome/manifest.json
+          test -f extensionBuilds/chrome/background.js
+          test -f extensionBuilds/chrome/popup/manual-push.html
+          test -f extensionBuilds/chrome/popup/manual-push.js
+          test -f extensionBuilds/chrome/popup/manual-push.css
+
+          python3 -m json.tool extensionBuilds/chrome/manifest.json >/dev/null
+          node --check extensionBuilds/chrome/background.js
+          node --check extensionBuilds/chrome/popup/manual-push.js
+
+      - name: Package Chrome extension
+        if: steps.publish.outputs.publish == 'true'
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          short_sha="${{ steps.sync.outputs.upstream_head }}"
+          short_sha="${short_sha:0:7}"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_release }}" == "true" && "${{ steps.sync.outputs.upstream_changed }}" != "true" ]]; then
+            asset="WebPresence-YouTube-Push-Controller-build-${{ github.run_number }}.zip"
+          else
+            asset="WebPresence-YouTube-Push-Controller-v${version}-${short_sha}.zip"
+          fi
+
+          rm -f "$asset"
+          (cd extensionBuilds/chrome && zip -qr "$GITHUB_WORKSPACE/$asset" .)
+          test -s "$asset"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        if: steps.publish.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_head }}
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.package.outputs.version }}"
+          asset="${{ steps.package.outputs.asset }}"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_release }}" == "true" && "${{ steps.sync.outputs.upstream_changed }}" != "true" ]]; then
+            tag="manual-push-controller-${{ github.run_number }}"
+            title="Web Presence YouTube Push Controller · v${version} · Build #${{ github.run_number }}"
+          else
+            tag="manual-push-controller-v${version}-${UPSTREAM_SHA:0:7}-${{ github.run_number }}"
+            title="Web Presence YouTube Push Controller · v${version} · Upstream ${UPSTREAM_SHA:0:7}"
+          fi
+
+          notes="Web Presence build with the manual YouTube → Discord Push Controller."
+          notes+=$'\n\n'
+          notes+="It opens a dedicated controller UI showing the current YouTube video and the video currently pinned to Discord. Pushing replaces the pinned video. Clearing removes it. The pinned video is kept active by the existing refresh alarm until replaced or cleared."
+          notes+=$'\n\n'
+          notes+="Upstream commit: $UPSTREAM_SHA"
+          notes+=$'\n'
+          notes+="Repository commit: $(git rev-parse HEAD)"
+          notes+=$'\n'
+          notes+="Version: $version"
+
+          gh release create "$tag" "$asset"             --repo "${{ github.repository }}"             --target "$(git rev-parse HEAD)"             --title "$title"             --notes "$notes"             --latest
