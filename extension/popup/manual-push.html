@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube → Discord</title>
+  <link rel="stylesheet" href="manual-push.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div><div class="eyebrow">WEB PRESENCE</div><h1>YouTube → Discord</h1></div>
+      <button class="icon-button" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
+    </header>
+    <section class="section">
+      <div class="section-title">Current YouTube Video</div>
+      <article class="card" id="currentCard"><div class="placeholder">Reading current YouTube tab…</div></article>
+      <div class="actions"><button class="primary" id="pushCurrent" disabled>Push current video</button></div>
+    </section>
+    <section class="section">
+      <div class="section-title">Currently pushed to Discord</div>
+      <article class="card" id="pushedCard"><div class="placeholder">Nothing is pushed to Discord.</div></article>
+      <div class="actions two"><button class="secondary" id="replaceCurrent" disabled>Replace with current</button><button class="danger" id="clearPushed" disabled>Clear</button></div>
+    </section>
+    <div class="status" id="status" aria-live="polite"></div>
+    <footer class="footer"><button class="link-button" id="openOriginal">Open Web Presence</button><button class="link-button" id="openLibrary">Activity Library</button></footer>
+  </main>
+  <script src="../libs/browser-polyfill.js"></script>
+  <script src="manual-push.js"></script>
+</body>
+</html>
